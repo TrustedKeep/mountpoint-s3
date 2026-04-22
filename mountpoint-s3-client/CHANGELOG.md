@@ -1,5 +1,6 @@
 ## Unreleased
 
+* Add `TlsConfig` (custom CA bundle and optional PEM client certificate/key) and a corresponding `S3ClientConfig::tls_config` builder method. When set, the client builds a custom TLS context and passes per-connection TLS options to the underlying CRT S3 client. PEM-based client mTLS is Linux-only.
 * Add S3 client error covering failures to create S3 Express session. ([#1793](https://github.com/awslabs/mountpoint-s3/pull/1793))
 
 ## v0.19.8 (March 20, 2026)

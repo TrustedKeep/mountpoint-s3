@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
 use clap::{ArgGroup, Parser, ValueEnum, value_parser};
-use mountpoint_s3_client::config::{AWSCRT_LOG_TARGET, AddressingStyle, S3ClientAuthConfig};
+use mountpoint_s3_client::config::{AWSCRT_LOG_TARGET, AddressingStyle, S3ClientAuthConfig, TlsConfig};
 use mountpoint_s3_client::instance_info::InstanceInfo;
 use mountpoint_s3_client::user_agent::UserAgent;
 use mountpoint_s3_fs::data_cache::{CacheLimit, DataCacheConfig, DiskDataCacheConfig, ExpressDataCacheConfig};
@@ -26,6 +26,7 @@ const AWS_CREDENTIALS_OPTIONS_HEADER: &str = "AWS credentials options";
 const LOGGING_OPTIONS_HEADER: &str = "Logging options";
 const CACHING_OPTIONS_HEADER: &str = "Caching options";
 const ADVANCED_OPTIONS_HEADER: &str = "Advanced options";
+const TLS_OPTIONS_HEADER: &str = "TLS options";
 
 const MOUNTPOINT_LOG_TARGET: &str = "mountpoint_s3";
 const FSTAB_DOCS: &str = "
@@ -407,6 +408,37 @@ Learn more in Mountpoint's configuration documentation (CONFIGURATION.md).\
         value_name = "NETWORK_INTERFACE",
     )]
     pub bind: Option<Vec<String>>,
+
+    #[clap(
+        long,
+        help = "Path to a PEM-encoded CA bundle used to validate the S3 server certificate. \
+                This bundle is used for ALL HTTPS connections made by Mountpoint, including \
+                IMDS/STS calls by the default credentials chain. \
+                Falls back to $AWS_CA_BUNDLE when not set.",
+        help_heading = TLS_OPTIONS_HEADER,
+        value_name = "PATH",
+    )]
+    pub ca_bundle: Option<PathBuf>,
+
+    #[clap(
+        long,
+        help = "Path to a PEM-encoded client certificate for mutual TLS authentication. \
+                Linux only. Must be provided together with --client-key.",
+        help_heading = TLS_OPTIONS_HEADER,
+        value_name = "PATH",
+        requires = "client_key",
+    )]
+    pub client_cert: Option<PathBuf>,
+
+    #[clap(
+        long,
+        help = "Path to a PEM-encoded client private key for mutual TLS authentication. \
+                Linux only. Must be provided together with --client-cert.",
+        help_heading = TLS_OPTIONS_HEADER,
+        value_name = "PATH",
+        requires = "client_cert",
+    )]
+    pub client_key: Option<PathBuf>,
 
     #[clap(skip)]
     pub is_fstab: bool,
@@ -790,13 +822,43 @@ impl CliArgs {
         }
     }
 
-    pub fn client_config(&self, version: &str) -> ClientConfig {
+    /// Build a [`TlsConfig`] from the CLI flags, falling back to the `AWS_CA_BUNDLE` environment
+    /// variable when `--ca-bundle` is not set. Returns `None` when no TLS overrides are requested.
+    fn tls_config(&self) -> anyhow::Result<Option<TlsConfig>> {
+        let ca_bundle = self
+            .ca_bundle
+            .clone()
+            .or_else(|| std::env::var_os("AWS_CA_BUNDLE").map(PathBuf::from));
+
+        if ca_bundle.is_none() && self.client_cert.is_none() && self.client_key.is_none() {
+            return Ok(None);
+        }
+
+        if let Some(ref path) = ca_bundle {
+            ensure_readable_file(path, "--ca-bundle (or $AWS_CA_BUNDLE)")?;
+        }
+        if let Some(ref path) = self.client_cert {
+            ensure_readable_file(path, "--client-cert")?;
+        }
+        if let Some(ref path) = self.client_key {
+            ensure_readable_file(path, "--client-key")?;
+        }
+
+        Ok(Some(TlsConfig {
+            ca_bundle,
+            client_cert: self.client_cert.clone(),
+            client_key: self.client_key.clone(),
+        }))
+    }
+
+    pub fn client_config(&self, version: &str) -> anyhow::Result<ClientConfig> {
         let instance_info = InstanceInfo::new();
         let user_agent = self.user_agent(&instance_info, version);
         let throughput_target = self.throughput_target_gbps(&instance_info);
         let region = autoconfigure::get_region(&instance_info, self.region.clone());
+        let tls = self.tls_config()?;
 
-        ClientConfig {
+        Ok(ClientConfig {
             region,
             endpoint_url: self.endpoint_url.clone(),
             addressing_style: self.addressing_style(),
@@ -809,8 +871,19 @@ impl CliArgs {
             bind: self.bind.clone(),
             part_config: self.part_config(),
             user_agent,
-        }
+            tls,
+        })
     }
+}
+
+fn ensure_readable_file(path: &std::path::Path, flag: &str) -> anyhow::Result<()> {
+    let md = std::fs::metadata(path)
+        .with_context(|| format!("{flag}: cannot stat {}", path.display()))?;
+    if !md.is_file() {
+        return Err(anyhow!("{flag}: {} is not a regular file", path.display()));
+    }
+    std::fs::File::open(path).with_context(|| format!("{flag}: cannot open {}", path.display()))?;
+    Ok(())
 }
 
 fn parse_perm_bits(perm_bit_str: &str) -> Result<u16, anyhow::Error> {

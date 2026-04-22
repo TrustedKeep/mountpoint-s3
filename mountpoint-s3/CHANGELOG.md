@@ -1,4 +1,10 @@
-## Unreleased (v1.22.3)
+## Unreleased (v1.23.0)
+
+### New features
+
+* Add `--ca-bundle`, `--client-cert`, and `--client-key` CLI flags for mutual TLS (mTLS) authentication with S3-compatible endpoints. `--ca-bundle` overrides the default trust store on all supported platforms and falls back to the `AWS_CA_BUNDLE` environment variable. PEM-based client mTLS (`--client-cert` / `--client-key`) is currently Linux-only.
+
+### Other changes
 
 * Improve error message when S3 Express session creation fails. ([#1793](https://github.com/awslabs/mountpoint-s3/pull/1793))
 

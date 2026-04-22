@@ -1,5 +1,8 @@
 ## Unreleased
 
+* Add `io::tls` module exposing safe wrappers around `aws_tls_ctx_options`, `aws_tls_ctx`, and `aws_tls_connection_options`, including support for custom CA bundles and PEM client mTLS (Linux-only).
+* Add `s3::client::ClientConfig::tls_connection_options` builder method to set per-connection TLS options on the CRT S3 client.
+
 ## v0.13.8 (March 20, 2026)
 
 * Update to latest CRT dependencies.

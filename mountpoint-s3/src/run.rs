@@ -194,7 +194,7 @@ fn mount(args: CliArgs, client_builder: impl ClientBuilder) -> anyhow::Result<Fu
     let fuse_session_config = args.fuse_session_config()?;
     let sse = args.server_side_encryption()?;
 
-    let client_config = args.client_config(build_info::FULL_VERSION);
+    let client_config = args.client_config(build_info::FULL_VERSION)?;
 
     // Set up a paged memory pool
     let pool = PagedPool::new_with_candidate_sizes([

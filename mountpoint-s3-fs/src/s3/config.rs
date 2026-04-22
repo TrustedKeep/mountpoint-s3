@@ -3,7 +3,7 @@ use std::num::NonZeroUsize;
 
 use anyhow::Context as _;
 use mountpoint_s3_client::config::{
-    AddressingStyle, Allocator, EndpointConfig, S3ClientAuthConfig, S3ClientConfig, Uri,
+    AddressingStyle, Allocator, EndpointConfig, S3ClientAuthConfig, S3ClientConfig, TlsConfig, Uri,
 };
 use mountpoint_s3_client::error::ObjectClientError;
 use mountpoint_s3_client::user_agent::UserAgent;
@@ -51,6 +51,9 @@ pub struct ClientConfig {
 
     /// Value for the user-agent header
     pub user_agent: UserAgent,
+
+    /// Optional TLS configuration: custom CA bundle and/or client certificate + key for mTLS
+    pub tls: Option<TlsConfig>,
 }
 
 #[derive(Debug)]
@@ -150,6 +153,9 @@ impl ClientConfig {
             .memory_pool(memory_pool);
         if let Some(interfaces) = self.bind {
             client_config = client_config.network_interface_names(interfaces);
+        }
+        if let Some(tls) = self.tls {
+            client_config = client_config.tls_config(tls);
         }
         if self.requester_pays {
             client_config = client_config.request_payer("requester");

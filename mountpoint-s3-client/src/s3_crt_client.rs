@@ -5,6 +5,7 @@ use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::prelude::OsStrExt;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -26,6 +27,7 @@ pub use mountpoint_s3_crt::io::event_loop::EventLoopGroup;
 use mountpoint_s3_crt::io::host_resolver::{AddressKinds, HostResolver, HostResolverDefaultOptions};
 use mountpoint_s3_crt::io::retry_strategy::{ExponentialBackoffJitterMode, RetryStrategy, StandardRetryOptions};
 use mountpoint_s3_crt::io::stream::InputStream;
+use mountpoint_s3_crt::io::tls::{TlsConnectionOptions, TlsContext, TlsContextOptions};
 use mountpoint_s3_crt::s3::buffer::Buffer;
 use mountpoint_s3_crt::s3::client::{
     BufferPoolUsageStats, ChecksumConfig, Client, ClientConfig, MetaRequest, MetaRequestOptions, MetaRequestResult,
@@ -114,6 +116,7 @@ pub struct S3ClientConfig {
     telemetry_callback: Option<Arc<dyn OnTelemetry>>,
     event_loop_threads: Option<u16>,
     buffer_pool_factory: Option<MemoryPoolFactoryWrapper>,
+    tls_config: Option<TlsConfig>,
 }
 
 impl Default for S3ClientConfig {
@@ -136,6 +139,7 @@ impl Default for S3ClientConfig {
             telemetry_callback: None,
             event_loop_threads: None,
             buffer_pool_factory: None,
+            tls_config: None,
         }
     }
 }
@@ -245,6 +249,19 @@ impl S3ClientConfig {
         self
     }
 
+    /// Configure TLS: optionally override the trust store with a CA bundle and/or supply a
+    /// client certificate + private key for mutual TLS authentication.
+    ///
+    /// The TLS context is applied to **all** HTTPS connections made by this client, including
+    /// credentials-provider traffic (IMDS, STS). If the custom CA bundle does not chain to the
+    /// public AWS trust anchors, pair this with a non-default credentials provider (e.g. static
+    /// credentials or `S3ClientAuthConfig::NoSigning`).
+    #[must_use = "S3ClientConfig follows a builder pattern"]
+    pub fn tls_config(mut self, tls_config: TlsConfig) -> Self {
+        self.tls_config = Some(tls_config);
+        self
+    }
+
     /// Set a custom telemetry callback handler
     #[must_use = "S3ClientConfig follows a builder pattern"]
     pub fn telemetry_callback(mut self, telemetry_callback: Arc<dyn OnTelemetry>) -> Self {
@@ -286,6 +303,77 @@ pub enum S3ClientAuthConfig {
     Profile(String),
     /// Use a custom credentials provider
     Provider(CredentialsProvider),
+}
+
+/// TLS configuration for the CRT-based S3 client.
+///
+/// When at least one field is set, the client builds a custom [`TlsContext`] and passes
+/// per-connection TLS options derived from it to the underlying CRT S3 client, causing them to
+/// be used for every HTTPS connection to S3. If all fields are `None`, the CRT's default
+/// platform TLS settings are used.
+#[derive(Debug, Clone, Default)]
+pub struct TlsConfig {
+    /// Path to a PEM-encoded CA bundle. When set, overrides the default trust store. This bundle
+    /// must be readable by the user running mountpoint.
+    pub ca_bundle: Option<PathBuf>,
+    /// Path to a PEM-encoded client certificate (Linux-only). Must be paired with `client_key`.
+    pub client_cert: Option<PathBuf>,
+    /// Path to a PEM-encoded client private key (Linux-only). Must be paired with `client_cert`.
+    pub client_key: Option<PathBuf>,
+}
+
+impl TlsConfig {
+    /// Returns true if no TLS configuration has been set (i.e. the CRT default should be used).
+    pub fn is_empty(&self) -> bool {
+        self.ca_bundle.is_none() && self.client_cert.is_none() && self.client_key.is_none()
+    }
+}
+
+/// Build per-connection TLS options from a [`TlsConfig`], or return `Ok(None)` if no TLS
+/// overrides are requested (in which case the CRT uses its default platform client context).
+fn build_tls_connection_options(
+    allocator: &Allocator,
+    tls_config: Option<&TlsConfig>,
+) -> Result<Option<TlsConnectionOptions>, NewClientError> {
+    let Some(tls) = tls_config else { return Ok(None) };
+    if tls.is_empty() {
+        return Ok(None);
+    }
+
+    let mut opts = TlsContextOptions::new_default_client(allocator);
+
+    if let Some(ca) = tls.ca_bundle.as_deref() {
+        opts.override_default_trust_store_from_path(None, Some(ca))
+            .map_err(NewClientError::CrtError)?;
+    }
+
+    match (tls.client_cert.as_deref(), tls.client_key.as_deref()) {
+        (Some(cert), Some(key)) => {
+            #[cfg(target_os = "linux")]
+            {
+                opts.set_client_mtls_from_path(allocator, cert, key)
+                    .map_err(NewClientError::CrtError)?;
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (cert, key);
+                return Err(NewClientError::InvalidConfiguration(
+                    "PEM-based client mTLS (client_cert/client_key) is currently Linux-only".into(),
+                ));
+            }
+        }
+        (None, None) => {}
+        _ => {
+            return Err(NewClientError::InvalidConfiguration(
+                "client_cert and client_key must be provided together".into(),
+            ));
+        }
+    }
+
+    let ctx = TlsContext::new_client(allocator, opts).map_err(NewClientError::CrtError)?;
+    // `TlsConnectionOptions` holds its own reference on the underlying TLS context, so the
+    // local `ctx` can drop once we've built the per-connection options.
+    Ok(Some(TlsConnectionOptions::new_from_ctx(&ctx)))
 }
 
 /// An S3 client that uses the [AWS Common Runtime (CRT)][crt] to make requests.
@@ -354,6 +442,8 @@ impl S3CrtClientInner {
         };
 
         let mut host_resolver = HostResolver::new_default(&allocator, &resolver_options).unwrap();
+
+        let tls_connection_options = build_tls_connection_options(&allocator, config.tls_config.as_ref())?;
 
         let bootstrap_options = ClientBootstrapOptions {
             event_loop_group: &mut event_loop_group,
@@ -458,6 +548,10 @@ impl S3CrtClientInner {
 
         if !config.network_interface_names.is_empty() {
             client_config.network_interface_names(config.network_interface_names);
+        }
+
+        if let Some(tls_opts) = tls_connection_options {
+            client_config.tls_connection_options(tls_opts);
         }
 
         let user_agent = config.user_agent.unwrap_or_else(|| UserAgent::new(None));

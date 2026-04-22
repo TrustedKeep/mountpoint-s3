@@ -1,5 +1,6 @@
 ## Unreleased
 
+* Add `tls: Option<TlsConfig>` to `ClientConfig` so callers can supply a custom CA bundle and/or client certificate for TLS connections to S3.
 * Update to latest S3 client. ([#1793](https://github.com/awslabs/mountpoint-s3/pull/1793))
 
 ## v0.9.2 (March 20, 2026)

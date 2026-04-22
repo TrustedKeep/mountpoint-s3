@@ -201,6 +201,29 @@ We also support the `AWS_ENDPOINT_URL` environment variable. The endpoint determ
 - Use `AWS_ENDPOINT_URL` if provided.
 - Fallback to automically inferring the endpoint.
 
+### TLS and mutual TLS (mTLS)
+
+When connecting to S3-compatible endpoints that use a private certificate authority, or that require mutual TLS for client authentication, Mountpoint accepts three optional CLI flags:
+
+* `--ca-bundle <PATH>` — path to a PEM-encoded bundle used to validate the server certificate. Overrides the default system trust store. When not set, Mountpoint falls back to the `AWS_CA_BUNDLE` environment variable (matching the behavior of the AWS CLI). Supported on all platforms.
+* `--client-cert <PATH>` — path to a PEM-encoded client certificate. Must be provided together with `--client-key`. **Linux only.**
+* `--client-key <PATH>` — path to a PEM-encoded client private key. Must be provided together with `--client-cert`. **Linux only.**
+
+Example:
+```
+mount-s3 my-bucket /mnt \
+  --endpoint-url https://s3.example.internal \
+  --ca-bundle /etc/ssl/private-ca.pem \
+  --client-cert /etc/ssl/mountpoint-client.pem \
+  --client-key /etc/ssl/mountpoint-client.key
+```
+
+> [!IMPORTANT]
+> The TLS configuration is applied to **every** HTTPS connection Mountpoint makes from the process, including calls to the EC2 Instance Metadata Service (IMDS) and AWS STS by the default credentials-provider chain. If your private CA bundle does not chain to the public AWS trust anchors, those credential-provider calls will fail certificate validation. In that case, either (a) include the public AWS trust chain in your bundle, (b) pair `--ca-bundle` with `--no-sign-request`, or (c) use `--profile` with pre-materialized credentials so no AWS HTTPS call is needed to resolve them.
+
+> [!NOTE]
+> Passphrase-protected client private keys are not supported. PKCS#12 / macOS mTLS support is tracked as a follow-up; on macOS, `--client-cert` / `--client-key` will return a configuration error.
+
 ### Data encryption
 
 Amazon S3 supports a number of [server-side encryption types](https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingEncryption.html). Mountpoint supports reading and writing to buckets that are configured with Amazon S3 managed keys (SSE-S3), with AWS KMS keys (SSE-KMS), or with dual-layer encryption with AWS KMS keys (DSSE-KMS) as the default encryption method. It does not currently support reading objects encrypted with customer-provided keys (SSE-C).

@@ -9,6 +9,7 @@ use crate::common::uri::Uri;
 use crate::http::request_response::{Headers, Message};
 use crate::io::channel_bootstrap::ClientBootstrap;
 use crate::io::retry_strategy::RetryStrategy;
+use crate::io::tls::TlsConnectionOptions;
 use crate::{CrtError, ToAwsByteCursor, aws_byte_cursor_as_slice};
 use futures::Future;
 use mountpoint_s3_crt_sys::*;
@@ -73,6 +74,11 @@ pub struct ClientConfig {
 
     /// Holds the custom pool implementation factory if set.
     pool_factory: Option<CrtBufferPoolFactory>,
+
+    /// Per-connection TLS options for the CRT to use. Kept alive on the Rust side so the raw
+    /// pointer stored in `inner.tls_connection_options` stays valid until [Client::new] copies
+    /// whatever it needs out of the config.
+    tls_connection_options: Option<TlsConnectionOptions>,
 }
 
 /// This struct bundles together the list of owned strings for the network interfaces, and the
@@ -150,6 +156,22 @@ impl ClientConfig {
         self.inner.network_interface_names_array = network_interface_names.aws_byte_cursors().as_ptr();
         self.inner.num_network_interface_names = network_interface_names.aws_byte_cursors().len();
 
+        self
+    }
+
+    /// Set a custom per-connection TLS options struct. TLS is always enabled when this is set.
+    ///
+    /// The `TlsConnectionOptions` is stored on the config and must outlive the CRT client
+    /// construction: [`Client::new`] copies whatever it needs out of the options struct before
+    /// returning, so it is safe to drop this [`ClientConfig`] (and thus the connection options)
+    /// once the [`Client`] exists.
+    pub fn tls_connection_options(&mut self, tls_connection_options: TlsConnectionOptions) -> &mut Self {
+        let stored = self.tls_connection_options.insert(tls_connection_options);
+        self.inner.tls_mode = aws_s3_meta_request_tls_mode::AWS_MR_TLS_ENABLED;
+        // SAFETY: `stored` lives as long as `self`, which outlives the `Client`'s consumption
+        // of `self.inner`. The CRT reads from this pointer during client setup and does not
+        // retain it after `Client::new` returns.
+        self.inner.tls_connection_options = stored.as_ptr();
         self
     }
 

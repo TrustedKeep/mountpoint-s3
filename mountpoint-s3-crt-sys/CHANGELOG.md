@@ -1,5 +1,7 @@
 ## Unreleased
 
+* Generate bindings for `aws/io/tls_channel_handler.h` to expose `aws_tls_ctx_options`, `aws_tls_ctx`, `aws_tls_connection_options`, and related functions.
+
 ## v0.16.2 (March 20, 2026)
 
 * Update to latest CRT dependencies.
