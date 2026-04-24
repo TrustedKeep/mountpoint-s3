@@ -77,6 +77,11 @@ impl TlsContextOptions {
     ///
     /// Both files must be PEM-encoded. This is implemented by the s2n-tls backend and is
     /// Linux-only. On other platforms this method is unavailable.
+    ///
+    /// **Ordering note:** the underlying `aws_tls_ctx_options_init_client_mtls_from_path`
+    /// re-initializes the options struct from scratch, discarding any state already set on it
+    /// (notably any CA override from [`Self::override_default_trust_store_from_path`]). Callers
+    /// mixing both should invoke this method first and apply the CA override afterwards.
     #[cfg(target_os = "linux")]
     pub fn set_client_mtls_from_path(
         &mut self,

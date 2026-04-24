@@ -342,11 +342,10 @@ fn build_tls_connection_options(
 
     let mut opts = TlsContextOptions::new_default_client(allocator);
 
-    if let Some(ca) = tls.ca_bundle.as_deref() {
-        opts.override_default_trust_store_from_path(None, Some(ca))
-            .map_err(NewClientError::CrtError)?;
-    }
-
+    // mTLS cert/key must be applied BEFORE any CA override: `set_client_mtls_from_path` wraps
+    // `aws_tls_ctx_options_init_client_mtls_from_path`, whose first action is to re-run
+    // `aws_tls_ctx_options_init_default_client` on the struct — that silently discards any
+    // previously-set CA bundle override. Applying mTLS first, then the CA override, preserves both.
     match (tls.client_cert.as_deref(), tls.client_key.as_deref()) {
         (Some(cert), Some(key)) => {
             #[cfg(target_os = "linux")]
@@ -368,6 +367,11 @@ fn build_tls_connection_options(
                 "client_cert and client_key must be provided together".into(),
             ));
         }
+    }
+
+    if let Some(ca) = tls.ca_bundle.as_deref() {
+        opts.override_default_trust_store_from_path(None, Some(ca))
+            .map_err(NewClientError::CrtError)?;
     }
 
     let ctx = TlsContext::new_client(allocator, opts).map_err(NewClientError::CrtError)?;
